@@ -1,0 +1,85 @@
+pipeline {
+  agent {
+    node {
+      label 'maven'
+    }
+
+  }
+  stages {
+    stage('checkout scm') {
+      agent none
+      steps {
+        git(url: 'http://xxxx.git', credentialsId: 'gitlab-token', branch: 'master', changelog: true, poll: false)
+      }
+    }
+
+    stage('unit test') {
+      agent none
+      steps {
+        container('maven') {
+          sh 'mvn clean -o -gs `pwd`/configuration/settings.xml test'
+        }
+
+      }
+    }
+
+    stage('code analysis') {
+      agent none
+      steps {
+        container('maven') {
+          withCredentials([string(credentialsId : 'sonar-token' ,variable : 'SONAR_TOKEN' ,)]) {
+            withSonarQubeEnv('sonar') {
+              sh '''#mvn sonar:sonar -gs `pwd`/configuration/settings.xml -Dsonar.login=$SONAR_TOKEN
+
+mvn sonar:sonar \\
+  -Dsonar.projectKey=java-demo \\
+  -Dsonar.host.url=http://xxxxx \\
+  -Dsonar.login=xxxx'''
+            }
+
+          }
+
+          timeout(unit: 'HOURS', activity: true, time: 1) {
+            waitForQualityGate 'true'
+          }
+
+        }
+
+      }
+    }
+
+    stage('build and push') {
+      agent none
+      steps {
+        container('maven') {
+          sh 'mvn -o -Dmaven.test.skip=true -gs `pwd`/configuration/settings.xml clean package'
+          sh 'docker build -f Dockerfile-online -t $REGISTRY/$DOCKERHUB_NAMESPACE/$APP_NAME:SNAPSHOT-$BUILD_NUMBER .'
+          withCredentials([usernamePassword(credentialsId : 'robot-test' ,passwordVariable : 'DOCKER_PASSWORD' ,usernameVariable : 'DOCKER_USERNAME' ,)]) {
+            sh 'echo "$DOCKER_PASSWORD" | docker login $REGISTRY -u \'robot$robot-test\' --password-stdin'
+            sh 'docker push $REGISTRY/$DOCKERHUB_NAMESPACE/$APP_NAME:SNAPSHOT-$BUILD_NUMBER'
+          }
+
+        }
+
+      }
+    }
+
+    stage('artifacts') {
+      agent none
+      steps {
+        archiveArtifacts 'target/*.jar'
+      }
+    }
+
+    stage('deploy to dev') {
+      agent none
+      steps {
+        withKubeConfig(credentialsId: 'k8s-pipeline-credential', serverUrl: 'https://xxxx') {
+          sh 'kubectl -n demo-project get pods'
+        }
+
+      }
+    }
+
+  }
+}
